@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
+from typing import Any, Dict
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
@@ -88,6 +89,103 @@ def build_lr_schedulers(optimizers, job_config: JobConfig):
             linear_warmup_linear_decay, warmup_steps, decay_steps
         )
         warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        return warmup_scheduler
+
+    class SchedulersContainer:
+        """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
+
+        def __init__(self, schedulers):
+            self.schedulers = schedulers
+
+        def step(self):
+            for schedulers in self.schedulers:
+                schedulers.step()
+
+    return SchedulersContainer(
+        [_build_lr_scheduler(optimizer) for optimizer in optimizers]
+    )
+
+
+def build_optimizers_in_backward(model_parts, job_config: JobConfig):
+    """Wrap one optimizer per param per model part, hooks registered to have .step()
+    and .zero_grad() during .backward().
+    """
+
+    def _build_optimizer(model):
+        name = job_config.optimizer.name
+        lr = job_config.optimizer.lr
+        fused = job_config.optimizer.fused
+
+        # Common parameters for both optimizers
+        optimizer_kwargs = {
+            "lr": lr,
+            "betas": (0.9, 0.95),
+            "weight_decay": 0.1,
+            "fused": fused,
+            "foreach": not fused,
+        }
+        if name == "Adam":
+            # TODO: make the optimizer options configurable by toml/cmd args
+            # optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
+            optim_dict = {
+                param: torch.optim.Adam([param], **optimizer_kwargs)
+                for param in model.parameters()
+            }
+        elif name == "AdamW":
+            raise NotImplementedError(f"Optimizer {name} not supported.")
+        else:
+            raise NotImplementedError(f"Optimizer {name} not added.")
+
+        def optim_hook(param) -> None:
+            optim_dict[param].step()
+            optim_dict[param].zero_grad()
+
+        for param in model.parameters():
+            param.register_post_accumulate_grad_hook(optim_hook)
+
+        optim_ckpt_wrapper = {
+            name: optim_dict[param] for name, param in model.named_parameters()
+        }
+        return optim_ckpt_wrapper
+
+    class OptimizerInBackwardWrapper:
+        def __init__(self, optimizers: list[Dict[str, torch.optim.Optimizer]]):
+            optims = []
+            for optims_from_model in optimizers:
+                optims.append(list(optims_from_model.values()))
+            self.optimizers = optims
+
+        def state_dict(self) -> list[Dict[str, Any]]:
+            """
+            Returns a state dict mapping parameter names to optimizer states. This
+            state_dict is only loadable by this same class.
+
+            Returns:
+                Dict[str, Any]: state dict mapping parameter names to optimizer states.
+            """
+            state_dicts = []
+            for optim_dict in self.optim_map:
+                state_dicts.append(
+                    {param: opt.state_dict() for param, opt in optim_dict.items()}
+                )
+            return state_dicts
+
+    return OptimizerInBackwardWrapper(
+        [_build_optimizer(model) for model in model_parts]
+    )
+
+
+def build_lr_schedulers_in_backward(optimizers, job_config: JobConfig):
+    def _build_lr_scheduler(optimizer):
+        """Build a linear warmup and linear decay scheduler"""
+        warmup_steps = int(job_config.training.warmup_steps)
+        decay_steps = float(max(1, job_config.training.steps - warmup_steps))
+        lr_lambda = functools.partial(
+            linear_warmup_linear_decay, warmup_steps, decay_steps
+        )
+        warmup_scheduler = []
+        for optim, lr in zip(optimizer, lr_lambda):
+            warmup_scheduler.append(LambdaLR(optim, lr_lambda=lr))
         return warmup_scheduler
 
     class SchedulersContainer:
