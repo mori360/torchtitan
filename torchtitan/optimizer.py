@@ -184,6 +184,7 @@ def build_lr_schedulers_in_backward(optimizers, job_config: JobConfig):
             linear_warmup_linear_decay, warmup_steps, decay_steps
         )
         warmup_scheduler = []
+        print("lr_lambda", lr_lambda, lr_lambda[0])
         for optim, lr in zip(optimizer, lr_lambda):
             warmup_scheduler.append(LambdaLR(optim, lr_lambda=lr))
         return warmup_scheduler

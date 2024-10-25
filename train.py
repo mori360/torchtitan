@@ -184,9 +184,9 @@ def main(job_config: JobConfig):
         lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
     else:
         optimizers = build_optimizers_in_backward(model_parts, job_config)
-        # lr_schedulers = build_lr_schedulers_in_bakcward(
-        #    optimizers.optimizers, job_config
-        # )
+        lr_schedulers = build_lr_schedulers_in_backward(
+            optimizers.optimizers, job_config
+        )
 
     train_state = TrainState()
 
