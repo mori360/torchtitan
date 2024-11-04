@@ -132,7 +132,10 @@ def build_optimizers_in_backward(model_parts, job_config: JobConfig):
                 for param in model.parameters()
             }
         elif name == "AdamW":
-            raise NotImplementedError(f"Optimizer {name} not supported.")
+            optim_dict = {
+                param: torch.optim.AdamW([param], **optimizer_kwargs)
+                for param in model.parameters()
+            }
         else:
             raise NotImplementedError(f"Optimizer {name} not added.")
 
@@ -141,7 +144,8 @@ def build_optimizers_in_backward(model_parts, job_config: JobConfig):
             optim_dict[param].zero_grad()
 
         for param in model.parameters():
-            param.register_post_accumulate_grad_hook(optim_hook)
+            if param.requires_grad:
+                param.register_post_accumulate_grad_hook(optim_hook)
 
         optim_ckpt_wrapper = {
             name: optim_dict[param] for name, param in model.named_parameters()
@@ -150,10 +154,7 @@ def build_optimizers_in_backward(model_parts, job_config: JobConfig):
 
     class OptimizerInBackwardWrapper:
         def __init__(self, optimizers: list[Dict[str, torch.optim.Optimizer]]):
-            optims = []
-            for optims_from_model in optimizers:
-                optims.append(list(optims_from_model.values()))
-            self.optimizers = optims
+            self.optimizers = optimizers
 
         def state_dict(self) -> list[Dict[str, Any]]:
             """
@@ -184,9 +185,8 @@ def build_lr_schedulers_in_backward(optimizers, job_config: JobConfig):
             linear_warmup_linear_decay, warmup_steps, decay_steps
         )
         warmup_scheduler = []
-        print("lr_lambda", lr_lambda, lr_lambda[0])
-        for optim, lr in zip(optimizer, lr_lambda):
-            warmup_scheduler.append(LambdaLR(optim, lr_lambda=lr))
+        for optim in optimizer.values():
+            warmup_scheduler.append(LambdaLR(optim, lr_lambda=lr_lambda))
         return warmup_scheduler
 
     class SchedulersContainer:

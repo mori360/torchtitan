@@ -103,24 +103,39 @@ class OptimizerWrapper(Stateful):
         self,
         model: Union[nn.Module, List[nn.Module]],
         optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
+        optim_in_bwd: bool = False,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
+        self.optim_in_bwd = optim_in_bwd
 
     def state_dict(self) -> Dict[str, Any]:
-        func = functools.partial(
-            get_optimizer_state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
+        if not self.optim_in_bwd:
+            func = functools.partial(
+                get_optimizer_state_dict,
+                options=StateDictOptions(flatten_optimizer_state_dict=True),
+            )
+            return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
+        else:
+            return {param: sub_opt.state_dict() for optim in self.optim for param, sub_opt in optim.optimizers}
+
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        func = functools.partial(
-            set_optimizer_state_dict,
-            optim_state_dict=state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        list(map(func, self.model, self.optim))
+        if not self.optim_in_bwd:
+            func = functools.partial(
+                set_optimizer_state_dict,
+                optim_state_dict=state_dict,
+                options=StateDictOptions(flatten_optimizer_state_dict=True),
+            )
+            list(map(func, self.model, self.optim))
+        else:
+            for optim in self.optim:
+                for param_name in state_dict.keys():
+                    if param_name not in optim:
+                        raise RuntimeError(
+                            f"Trying to load optimizer state for unexpected param {param_name}"
+                        )
+                    optim_map[param_name].load_state_dict(state_dict[param_name])
 
 
 class Terminate:
@@ -221,7 +236,7 @@ class CheckpointManager:
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
-                "optimizer": OptimizerWrapper(model_parts, optimizers),
+                "optimizer": OptimizerWrapper(model_parts, optimizers, job_config.training.enable_optimizer_in_backward),
                 "dataloader": dataloader,
             }
         )
