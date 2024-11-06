@@ -521,6 +521,49 @@ class JobConfig:
             help="float8 scaling for input, dynamic (default) or delayed",
         )
 
+        # int8 configs
+        self.parser.add_argument(
+            "--int8.enable_int8_linear",
+            action="store_true",
+            help="""
+                If true, swaps `torch.nn.Linear` with `Int8Linear`.
+                This feature requires you to install 'torchao' which can be found
+                here: https://github.com/pytorch/ao
+            """,
+        )
+        self.parser.add_argument(
+            "--int8.enable_fsdp_int8_all_gather",
+            action="store_true",
+            default=False,
+            help="Whether enable int8 all-gather in FSDP",
+        )
+        self.parser.add_argument(
+            "--int8.precompute_float8_dynamic_scale_for_fsdp",
+            action="store_true",
+            default=False,
+            help="Whether precompute int8 scales dynamically for FSDP",
+        )
+        self.parser.add_argument(
+            "--int8.scaling_type_input",
+            type=str,
+            default="dynamic",
+            help="int8 scaling for input, dynamic (default) or delayed",
+            choices=["dynamic", "delayed"],
+        )
+        self.parser.add_argument(
+            "--int8.scaling_type_weight",
+            type=str,
+            default="dynamic",
+            help="int8 scaling for input, dynamic (default) or delayed",
+        )
+        self.parser.add_argument(
+            "--int8.scaling_type_grad_output",
+            type=str,
+            default="dynamic",
+            help="int8 scaling for input, dynamic (default) or delayed",
+        )
+
+
         # communications library settings
         self.parser.add_argument(
             "--comm.init_timeout_seconds",

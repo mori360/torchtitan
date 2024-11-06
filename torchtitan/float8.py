@@ -146,3 +146,77 @@ class Float8Handler:
         models = [model] if isinstance(model, nn.Module) else model
         for m in models:
             self._sync_float8_amax_and_scale_history(m)
+
+
+class Int8Handler:
+    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        self.enabled = False
+
+        int8_config = job_config.int8
+        if not int8_config.enable_int8_linear:
+            return
+        try:
+            from torchao.float8 import CastConfig, ScalingType
+            from torchao.int8 import Int8LinearConfig
+        except ImportError as e:
+            raise ImportError(
+                "torchao is not installed. Please install it to use int8 linear layers."
+            ) from e
+
+        # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
+        enable_fsdp_int8_all_gather = False
+        # enable_fsdp_float8_all_gather = (
+        #    parallel_dims.dp_shard_enabled
+        #    and float8_config.enable_fsdp_float8_all_gather
+        # )
+        scaling_type_input = ScalingType(int8_config.scaling_type_input)
+        scaling_type_weight = ScalingType(int8_config.scaling_type_weight)
+        scaling_type_grad_output = ScalingType(int8_config.scaling_type_grad_output)
+        self.config = Int8LinearConfig(
+            enable_fsdp_int8_all_gather=enable_fsdp_int8_all_gather,
+            cast_config_input=CastConfig(scaling_type=scaling_type_input),
+            cast_config_weight=CastConfig(scaling_type=scaling_type_weight),
+            cast_config_grad_output=CastConfig(scaling_type=scaling_type_grad_output),
+            enable_pre_and_post_forward=False,
+        )
+
+        self.enabled = True
+
+        # for precompute_float8_dynamic_scale_for_fsdp
+        self.precompute_scale = (
+            enable_fsdp_int8_all_gather
+            and ubt8_config.precompute_float8_dynamic_scale_for_fsdp
+        )
+
+        # for sync_float8_amax_and_scale_history
+        self.delayed_scaling = (
+            scaling_type_input == "delayed"
+            or scaling_type_weight == "delayed"
+            or scaling_type_grad_output == "delayed"
+        )
+        self._sync_int8_amax_and_scale_history = None
+        self.compile = job_config.training.compile
+
+        logger.info("Int8 training active")
+
+    def convert_to_int8_training(self, model: nn.Module):
+        """
+        This function converts the linear layers of `model` to `Float8Linear`.
+        Note that today, only dynamic tensor scaling (the default) is supported.
+        This will mutate the model inplace.
+        """
+        if not self.enabled:
+            return
+
+        from torchao.int8 import convert_to_float8_training
+
+        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
+        convert_to_float8_training(
+            model,
+            config=self.config,
+            module_filter_fn=lambda mod, fqn: fqn != "output",
+        )
+        logger.info(
+            "Swapped to Int8Linear layers with enable_fsdp_float8_all_gather="
+            f"{self.config.enable_fsdp_int8_all_gather}"
+        )

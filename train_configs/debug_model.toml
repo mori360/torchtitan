@@ -61,3 +61,5 @@ selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac bas
 
 [float8]
 enable_float8_linear = false
+[int8]
+enable_int8_linear = true
