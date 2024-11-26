@@ -22,7 +22,6 @@ from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import (
     build_lr_schedulers,
-    build_lr_schedulers_in_backward,
     build_optimizers,
     build_optimizers_in_backward,
 )
@@ -190,12 +189,9 @@ def main(job_config: JobConfig):
     # build optimizer after applying parallelisms to the model
     if not job_config.training.enable_optimizer_in_backward:
         optimizers = build_optimizers(model_parts, job_config)
-        lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
     else:
         optimizers = build_optimizers_in_backward(model_parts, job_config)
-        lr_schedulers = build_lr_schedulers_in_backward(
-            optimizers.optimizers, job_config
-        )
+    lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
 
     train_state = TrainState()
 
@@ -342,9 +338,6 @@ def main(job_config: JobConfig):
             if not job_config.training.enable_optimizer_in_backward:
                 optimizers.step()
             lr_schedulers.step()
-            logger.info(f"after step, {optimizers.optimizers[0]}")
-            # for scheduler in lr_schedulers.schedulers:
-            #    logger.info(f"after step, {scheduler.state_dict()}")
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance

@@ -82,28 +82,41 @@ def linear_warmup_linear_decay(
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):
-    def _build_lr_scheduler(optimizer):
+    optim_in_bwd = job_config.training.enable_optimizer_in_backward
+
+    def _build_lr_scheduler(optimizer, optim_in_bwd):
         """Build a linear warmup and linear decay scheduler"""
         warmup_steps = int(job_config.training.warmup_steps)
         decay_steps = float(max(1, job_config.training.steps - warmup_steps))
         lr_lambda = functools.partial(
             linear_warmup_linear_decay, warmup_steps, decay_steps
         )
-        warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        if not optim_in_bwd:
+            warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        else:
+            warmup_scheduler = []
+            for optim in optimizer.values():
+                warmup_scheduler.append(LambdaLR(optim, lr_lambda=lr_lambda))
         return warmup_scheduler
 
     class SchedulersContainer:
         """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
 
-        def __init__(self, schedulers):
+        def __init__(self, schedulers, optim_in_bwd):
             self.schedulers = schedulers
+            self.optim_in_bwd = optim_in_bwd
 
         def step(self):
             for schedulers in self.schedulers:
-                schedulers.step()
+                if not self.optim_in_bwd:
+                    schedulers.step()
+                else:
+                    for scheduler in schedulers:
+                        scheduler.step()
 
     return SchedulersContainer(
-        [_build_lr_scheduler(optimizer) for optimizer in optimizers]
+        [_build_lr_scheduler(optimizer, optim_in_bwd) for optimizer in optimizers],
+        optim_in_bwd,
     )
 
 
@@ -174,42 +187,4 @@ def build_optimizers_in_backward(model_parts, job_config: JobConfig):
 
     return OptimizerInBackwardWrapper(
         [_build_optimizer(model) for model in model_parts]
-    )
-
-
-def build_lr_schedulers_in_backward(optimizers, job_config: JobConfig):
-    def _build_lr_scheduler(optimizer):
-        """Build a linear warmup and linear decay scheduler"""
-        warmup_steps = int(job_config.training.warmup_steps)
-        decay_steps = float(max(1, job_config.training.steps - warmup_steps))
-        lr_lambda = functools.partial(
-            linear_warmup_linear_decay, warmup_steps, decay_steps
-        )
-        warmup_scheduler = []
-        for optim in optimizer.values():
-            warmup_scheduler.append(LambdaLR(optim, lr_lambda=lr_lambda))
-        return warmup_scheduler
-
-    class SchedulersContainer:
-        """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
-
-        def __init__(self, schedulers):
-            self.schedulers = schedulers
-
-        def state_dict(self):
-            state_dicts = []
-            for schedulers in self.schedulers:
-                state_dict = []
-                for scheduler in schedulers:
-                    state_dict.append(scheduler.state_dict())
-                state_dicts.append(state_dict)
-            return state_dicts
-
-        def step(self):
-            for schedulers in self.schedulers:
-                for scheduler in schedulers:
-                    scheduler.step()
-
-    return SchedulersContainer(
-        [_build_lr_scheduler(optimizer) for optimizer in optimizers]
     )
