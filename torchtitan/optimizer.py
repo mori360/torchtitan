@@ -95,7 +95,7 @@ def build_lr_schedulers(optimizers, job_config: JobConfig):
             warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
         else:
             warmup_scheduler = []
-            for optim in optimizer.values():
+            for optim in optimizer:
                 warmup_scheduler.append(LambdaLR(optim, lr_lambda=lr_lambda))
         return warmup_scheduler
 
@@ -161,9 +161,9 @@ def build_optimizers_in_backward(model_parts, job_config: JobConfig):
             if param.requires_grad:
                 param.register_post_accumulate_grad_hook(optim_hook)
 
-        optim_ckpt_wrapper = {
-            name: optim_dict[param] for name, param in model.named_parameters()
-        }
+        optim_ckpt_wrapper = [
+            optim_dict[param] for name, param in model.named_parameters()
+        ]
         return optim_ckpt_wrapper
 
     class OptimizerInBackwardWrapper:
