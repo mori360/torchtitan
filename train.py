@@ -200,7 +200,6 @@ def main(job_config: JobConfig):
     train_state = TrainState()
 
     # load initial checkpoint
-    """
     checkpoint = CheckpointManager(
         dataloader=data_loader,
         model_parts=model_parts,
@@ -209,7 +208,6 @@ def main(job_config: JobConfig):
         states={"train_state": train_state},
         job_config=job_config,
     )
-    """
 
     if job_config.checkpoint.create_seed_checkpoint:
         assert (
@@ -218,9 +216,7 @@ def main(job_config: JobConfig):
         checkpoint.save(curr_step=0, force=True)
         logger.info("Created seed checkpoint")
         return
-    """
     checkpoint_loaded = checkpoint.load()
-    """
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
         # TODO: fix this by allowing each rank to set their own seed
@@ -256,9 +252,7 @@ def main(job_config: JobConfig):
     time_last_log = time.perf_counter()
     gpu_memory_monitor.reset_peak_stats()
 
-    """
     checkpoint.reset()
-    """
 
     # train loop
     logger.info(
@@ -343,12 +337,14 @@ def main(job_config: JobConfig):
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
             # optimizer step
-            """
             checkpoint.maybe_wait_for_staging()
-            """
+
             if not job_config.training.enable_optimizer_in_backward:
                 optimizers.step()
-                lr_schedulers.step()
+            lr_schedulers.step()
+            logger.info(f"after step, {optimizers.optimizers[0]}")
+            # for scheduler in lr_schedulers.schedulers:
+            #    logger.info(f"after step, {scheduler.state_dict()}")
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
@@ -425,11 +421,9 @@ def main(job_config: JobConfig):
                 time_last_log = time.perf_counter()
                 gpu_memory_monitor.reset_peak_stats()
 
-            """
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)
             )
-            """
 
             # signal the profiler that the next profiling step has started
             if torch_profiler:

@@ -10,6 +10,7 @@ from typing import Any, Dict
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torchtitan.config_manager import JobConfig
+from torchtitan.logging import logger
 
 
 # consider split between PP and non-PP
@@ -195,9 +196,19 @@ def build_lr_schedulers_in_backward(optimizers, job_config: JobConfig):
         def __init__(self, schedulers):
             self.schedulers = schedulers
 
+        def state_dict(self):
+            state_dicts = []
+            for schedulers in self.schedulers:
+                state_dict = []
+                for scheduler in schedulers:
+                    state_dict.append(scheduler.state_dict())
+                state_dicts.append(state_dict)
+            return state_dicts
+
         def step(self):
             for schedulers in self.schedulers:
-                schedulers.step()
+                for scheduler in schedulers:
+                    scheduler.step()
 
     return SchedulersContainer(
         [_build_lr_scheduler(optimizer) for optimizer in optimizers]
