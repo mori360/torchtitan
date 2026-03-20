@@ -5,9 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Annotated, Protocol
 
 import torch.nn as nn
+import tyro
 
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import Configurable
@@ -67,7 +68,7 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         (e.g. Float8LinearConverter.Config) whose build() constructs the converter.
         """
 
-        converters: list = field(default_factory=list)
+        converters: Annotated[list, tyro.conf.Suppress] = field(default_factory=list)
         """List of converter Config objects to apply to the model."""
 
         print_after_conversion: bool = False
@@ -76,6 +77,7 @@ class ModelConvertersContainer(Configurable, ModelConverter):
         def __post_init__(self):
             _validate_converter_ordering(self.converters)
             _validate_quantization(self.converters)
+            _validate_qat_lora_finalize(self.converters)
 
     def __init__(
         self,
@@ -122,20 +124,24 @@ class ModelConvertersContainer(Configurable, ModelConverter):
 def _validate_converter_ordering(converters: list[Configurable.Config]):
     """Validates that converters are in the correct order.
 
-    LoRA must come after quantization because quantization replaces nn.Linear
-    with specialized subclasses (e.g. Float8Linear), and LoRA dynamically
-    inherits from whatever linear class it wraps.
+    LoRA must come after quantization and QAT because both replace nn.Linear
+    with specialized subclasses (e.g. Float8Linear, FakeQuantizedLinear), and
+    LoRA dynamically inherits from whatever linear class it wraps.
     """
     from torchtitan.components.lora import LoRAConverter
+    from torchtitan.components.quantization.qat import QATConverter
 
     seen_lora = False
     for config in converters:
         if isinstance(config, LoRAConverter.Config):
             seen_lora = True
-        elif isinstance(config, QuantizationConverter.Config) and seen_lora:
+        elif (
+            isinstance(config, (QuantizationConverter.Config, QATConverter.Config))
+            and seen_lora
+        ):
             raise ValueError(
-                "LoRA converter must come after quantization converters. "
-                "Quantization replaces nn.Linear with specialized subclasses, "
+                "LoRA converter must come after quantization and QAT converters. "
+                "Quantization/QAT replaces nn.Linear with specialized subclasses, "
                 "and LoRA must wrap the final linear class."
             )
 
@@ -158,3 +164,29 @@ def _validate_quantization(converters: list[Configurable.Config]):
                     "Cannot combine model converters with different quantization types: "
                     f"'{qt}' and '{existing_type}'"
                 )
+
+
+def _validate_qat_lora_finalize(converters: list[Configurable.Config]):
+    """Warn if QAT convert_at_end=True but LoRA merge_adapter is False.
+
+    QAT CONVERT replaces FakeQuantizedLinear with real quantized modules, but
+    this only works after LoRA adapters have been merged into base weights.
+    If LoRA is not merging adapters, CONVERT will be skipped.
+    """
+    from torchtitan.components.lora import LoRAConverter
+    from torchtitan.components.quantization.qat import QATConverter
+
+    qat_convert_at_end = False
+    lora_merge_adapter: bool | None = None
+    for config in converters:
+        if isinstance(config, QATConverter.Config) and config.convert_at_end:
+            qat_convert_at_end = True
+        if isinstance(config, LoRAConverter.Config):
+            lora_merge_adapter = config.merge_adapter
+
+    if qat_convert_at_end and lora_merge_adapter is not None and not lora_merge_adapter:
+        logger.warning(
+            "QAT convert_at_end=True requires LoRA merge_adapter=True to apply "
+            "real quantization. With merge_adapter=False, QAT CONVERT will be "
+            "skipped at end of training.",
+        )
