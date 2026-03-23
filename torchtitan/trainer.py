@@ -680,7 +680,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-            with self.train_context():
+            eval_only = self.config.checkpoint.load_only
+            grad_ctx = torch.no_grad() if eval_only else self.train_context()
+            with grad_ctx:
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     # Compute loss sum (reduction='sum')
@@ -692,7 +694,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 # need to free pred before bwd to avoid peaking memory
                 del pred
-                loss.backward()
+                if not eval_only:
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
@@ -742,16 +745,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
             accumulated_losses.append(loss.detach())
 
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.config.training.max_norm,
-            foreach=True,
-            pp_mesh=parallel_dims.get_optional_mesh("pp"),
-            ep_enabled=parallel_dims.ep_enabled,
-        )
-        self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
-        self.lr_schedulers.step()
+        # When load_only=True, skip backward-dependent steps (eval mode).
+        if self.config.checkpoint.load_only:
+            grad_norm = torch.tensor(0.0, device=self.device)
+        else:
+            grad_norm = dist_utils.clip_grad_norm_(
+                [p for m in self.model_parts for p in m.parameters()],
+                self.config.training.max_norm,
+                foreach=True,
+                pp_mesh=parallel_dims.get_optional_mesh("pp"),
+                ep_enabled=parallel_dims.ep_enabled,
+            )
+            self.checkpointer.maybe_wait_for_staging()
+            self.optimizers.step()
+            self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
@@ -805,6 +812,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         config = self.config
 
         self.checkpointer.load(step=config.checkpoint.load_step)
+
+        # When load_only=True, run converter finalize after load (e.g. LoRA merge,
+        # QAT CONVERT) so the model is in its final form before the eval step.
+        if config.checkpoint.load_only:
+            for model_part in self.model_parts:
+                hooks = getattr(model_part, "_converter_hooks", None)
+                if hooks is not None and hooks.finalize_fn is not None:
+                    hooks.finalize_fn()
+
         logger.info(f"Training starts at step {self.step + 1}")
 
         with (

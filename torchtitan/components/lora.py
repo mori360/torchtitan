@@ -411,8 +411,11 @@ class LoRAConverter(Configurable):
         # With QAT first, LoRA inherits from FakeQuantizedLinear instead.
         qat_scheme = getattr(model, "_qat_scheme", None)
         if qat_scheme is not None:
-            qat_group_size = getattr(model, "_qat_group_size", 128)
-            self._apply_adapter_qat(model, qat_scheme, qat_group_size)
+            qat_group_size = getattr(model, "_qat_group_size", 8)
+            qat_adapter_mode = getattr(model, "_qat_adapter_mode", "all")
+            self._apply_adapter_qat(
+                model, qat_scheme, qat_group_size, adapter_mode=qat_adapter_mode
+            )
 
         if self.merge_adapter:
             hooks = ConverterCheckpointHooks(key_filter=self._is_lora_key)
@@ -446,12 +449,21 @@ class LoRAConverter(Configurable):
             return False
 
     def _apply_adapter_qat(
-        self, model: nn.Module, scheme: str, group_size: int
+        self,
+        model: nn.Module,
+        scheme: str,
+        group_size: int,
+        *,
+        adapter_mode: str = "all",
     ) -> None:
         """Apply QAT to LoRA adapter linears.
 
         Always applies to lora_a. For lora_b, skips if rank is incompatible
         with the scheme's block/group size (Unsloth approach).
+
+        Args:
+            adapter_mode: ``"all"`` applies to both lora_a and lora_b (if
+                compatible). ``"lora_a_only"`` only applies to lora_a.
         """
         from torchtitan.components.quantization.qat import apply_qat_prepare
 
@@ -463,7 +475,9 @@ class LoRAConverter(Configurable):
 
         apply_qat_prepare(model, scheme, group_size, filter_fn=_is_lora(".lora_a"))
 
-        skip_lora_b = not self._qat_compatible(self.rank, scheme, group_size)
+        skip_lora_b = adapter_mode == "lora_a_only" or not self._qat_compatible(
+            self.rank, scheme, group_size
+        )
         if not skip_lora_b:
             apply_qat_prepare(
                 model, scheme, group_size, filter_fn=_is_lora(".lora_b")
@@ -515,10 +529,35 @@ class LoRAConverter(Configurable):
             del mod.lora_a, mod.lora_b
             if hasattr(mod, "_lora_scaling"):
                 del mod._lora_scaling
-            # Restore the parent class (e.g. FakeQuantizedLinear or nn.Linear)
-            parent_cls = type(mod).__mro__[1]
-            if parent_cls is not nn.Module and issubclass(parent_cls, nn.Linear):
-                mod.__class__ = parent_cls
+            # Restore the parent class by removing the LoRA class from the MRO.
+            # Without FSDP: LoRAFakeQuantizedLinear -> FakeQuantizedLinear -> ...
+            #   Just set __class__ to FakeQuantizedLinear.
+            # With FSDP: FSDPLoRAFakeQuantizedLinear -> FSDPModule -> LoRAFQL -> FQL -> ...
+            #   Need to rebuild: type("FSDPFQL", (FSDPModule, FQL), dct).
+            mro = type(mod).__mro__
+            # Find the LoRA class (always named "LoRA{Base}")
+            lora_idx = next(
+                (i for i, c in enumerate(mro) if c.__name__.startswith("LoRA") and issubclass(c, nn.Linear)),
+                None,
+            )
+            if lora_idx is not None:
+                lora_cls = mro[lora_idx]
+                # Base class is the LoRA class's direct parent
+                base_cls = lora_cls.__mro__[1]
+                if lora_idx == 0:
+                    # No wrapper (no FSDP): direct swap
+                    mod.__class__ = base_cls
+                else:
+                    # Wrapper classes before LoRA (e.g. FSDPModule)
+                    wrappers = [c for c in mro[1:lora_idx] if c is not type(mod)]
+                    dct = {k: v for k, v in type(mod).__dict__.items()
+                           if k not in ("__dict__", "__weakref__")}
+                    new_cls = type(
+                        type(mod).__name__.replace(lora_cls.__name__, base_cls.__name__),
+                        (*wrappers, base_cls),
+                        dct,
+                    )
+                    mod.__class__ = new_cls
 
         # Clean up hooks — model is now a plain base model
         if hasattr(model, "_converter_hooks"):
